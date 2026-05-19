@@ -14,7 +14,7 @@ from aiogram.enums import ChatMemberStatus, ChatType
 # ══════════════════════════════════════════════
 #  CONFIG
 # ══════════════════════════════════════════════
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+BOT_TOKEN = "8637348879:AAHFg7KjB50yxAwosCNwjk7fIJDGOvBf5jo"
 OWNER_ID = 8675927241
 
 # ══════════════════════════════════════════════
