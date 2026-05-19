@@ -14,7 +14,7 @@ from aiogram.enums import ChatMemberStatus, ChatType
 # ══════════════════════════════════════════════
 #  CONFIG
 # ══════════════════════════════════════════════
-BOT_TOKEN = "8637348879:AAHFg7KjB50yxAwosCNwjk7fIJDGOvBf5jo"
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
 OWNER_ID = 8675927241
 
 # ══════════════════════════════════════════════
@@ -249,7 +249,7 @@ async def on_member_change(event: ChatMemberUpdated):
 # ══════════════════════════════════════════════
 #  AUTO-MODERATION
 # ══════════════════════════════════════════════
-@router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
+@router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.text.func(lambda t: not t or not t.startswith("/")))
 async def automod(message: Message):
     if not message.from_user:
         return
@@ -1023,11 +1023,20 @@ async def cmd_adopt(message: Message):
         parse_mode="HTML")
 
 # ══════════════════════════════════════════════
-#  OWNER COMMANDS (DM)
+#  OWNER COMMANDS (DM + groups)
 # ══════════════════════════════════════════════
+def owner_only(func):
+    async def wrapper(message: Message, *args, **kwargs):
+        if message.from_user.id != OWNER_ID:
+            await message.answer("❌ Только для владельца.")
+            return
+        await func(message, *args, **kwargs)
+    wrapper.__name__ = func.__name__
+    return wrapper
+
 @router.message(Command(commands=["лог","setlog"]))
+@owner_only
 async def cmd_setlog(message: Message):
-    if message.from_user.id != OWNER_ID: return
     args = message.text.split()
     if len(args) < 3:
         await message.answer("⚠️ /лог [chat_id] [channel_id]"); return
@@ -1039,13 +1048,161 @@ async def cmd_setlog(message: Message):
         await message.answer("❌ Неверные ID.")
 
 @router.message(Command(commands=["мойчаты","mychats"]))
+@owner_only
 async def cmd_mychats(message: Message):
-    if message.from_user.id != OWNER_ID: return
     rows = q("SELECT chat_id,title FROM chats", fetch="all") or []
     if not rows:
         await message.answer("📋 Нет чатов."); return
     lines = [f"• <code>{cid}</code> — {title or '—'}" for cid, title in rows]
-    await message.answer("📋 <b>Чаты:</b>\n" + "\n".join(lines), parse_mode="HTML")
+    await message.answer("📋 <b>Мои чаты:</b>\n" + "\n".join(lines), parse_mode="HTML")
+
+@router.message(Command(commands=["рассылка","broadcast"]))
+@owner_only
+async def cmd_broadcast(message: Message):
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("⚠️ /рассылка [текст]"); return
+    rows = q("SELECT chat_id FROM chats", fetch="all") or []
+    ok, fail = 0, 0
+    for (cid,) in rows:
+        try:
+            await bot.send_message(cid, f"📢 <b>Объявление:</b>\n\n{args[1]}", parse_mode="HTML")
+            ok += 1
+        except:
+            fail += 1
+    await message.answer(f"✅ Отправлено: {ok}\n❌ Ошибок: {fail}")
+
+@router.message(Command(commands=["статбота","botstats"]))
+@owner_only
+async def cmd_botstats(message: Message):
+    chats = q("SELECT COUNT(*) FROM chats", fetch="one")[0]
+    users = q("SELECT COUNT(DISTINCT user_id) FROM stats", fetch="one")[0]
+    warns_total = q("SELECT COUNT(*) FROM warns", fetch="one")[0]
+    eco_users = q("SELECT COUNT(*) FROM economy", fetch="one")[0]
+    await message.answer(
+        f"📊 <b>Статистика бота</b>\n\n"
+        f"💬 Чатов: <b>{chats}</b>\n"
+        f"👥 Уникальных юзеров: <b>{users}</b>\n"
+        f"⚠️ Активных варнов: <b>{warns_total}</b>\n"
+        f"💰 Экономика юзеров: <b>{eco_users}</b>",
+        parse_mode="HTML")
+
+@router.message(Command(commands=["выдатьбаланс","givemoney"]))
+@owner_only
+async def cmd_givemoney(message: Message):
+    args = message.text.split()
+    if len(args) < 3 or not args[1].lstrip("-").isdigit() or not args[2].lstrip("-").isdigit():
+        await message.answer("⚠️ /выдатьбаланс [user_id] [сумма]"); return
+    uid, amount = int(args[1]), int(args[2])
+    ensure_economy(uid)
+    q("UPDATE economy SET balance=balance+? WHERE user_id=?", amount, uid)
+    bal = q("SELECT balance FROM economy WHERE user_id=?", uid, fetch="one")[0]
+    await message.answer(f"✅ Выдано <b>{amount} 💎</b> юзеру <code>{uid}</code>\nБаланс: <b>{bal} 💎</b>", parse_mode="HTML")
+
+@router.message(Command(commands=["забратьбаланс","takemoney"]))
+@owner_only
+async def cmd_takemoney(message: Message):
+    args = message.text.split()
+    if len(args) < 3:
+        await message.answer("⚠️ /забратьбаланс [user_id] [сумма]"); return
+    uid, amount = int(args[1]), int(args[2])
+    ensure_economy(uid)
+    q("UPDATE economy SET balance=MAX(0, balance-?) WHERE user_id=?", amount, uid)
+    bal = q("SELECT balance FROM economy WHERE user_id=?", uid, fetch="one")[0]
+    await message.answer(f"✅ Снято <b>{amount} 💎</b> у <code>{uid}</code>\nОстаток: <b>{bal} 💎</b>", parse_mode="HTML")
+
+@router.message(Command(commands=["глобальныйбан","gban"]))
+@owner_only
+async def cmd_gban(message: Message):
+    if not message.reply_to_message:
+        await message.answer("⚠️ Ответь на сообщение."); return
+    target = message.reply_to_message.from_user
+    chats = q("SELECT chat_id FROM chats", fetch="all") or []
+    ok, fail = 0, 0
+    for (cid,) in chats:
+        try:
+            await bot.ban_chat_member(cid, target.id)
+            ok += 1
+        except:
+            fail += 1
+    await message.answer(
+        f"🚫 <b>Глобальный бан</b> {await mention(target.id, target.full_name)}\n"
+        f"✅ Забанен в {ok} чатах\n❌ Ошибок: {fail}", parse_mode="HTML")
+
+@router.message(Command(commands=["глобальныйразбан","gunban"]))
+@owner_only
+async def cmd_gunban(message: Message):
+    if not message.reply_to_message:
+        await message.answer("⚠️ Ответь на сообщение."); return
+    target = message.reply_to_message.from_user
+    chats = q("SELECT chat_id FROM chats", fetch="all") or []
+    ok, fail = 0, 0
+    for (cid,) in chats:
+        try:
+            await bot.unban_chat_member(cid, target.id)
+            ok += 1
+        except:
+            fail += 1
+    await message.answer(
+        f"✅ <b>Глобальный разбан</b> {await mention(target.id, target.full_name)}\n"
+        f"Разбанен в {ok} чатах", parse_mode="HTML")
+
+@router.message(Command(commands=["добавитьтовар","additem"]))
+@owner_only
+async def cmd_additem(message: Message):
+    args = message.text.split(maxsplit=3)
+    if len(args) < 4:
+        await message.answer("⚠️ /добавитьтовар [цена] [название] [описание]"); return
+    try:
+        price = int(args[1])
+    except:
+        await message.answer("❌ Цена должна быть числом."); return
+    q("INSERT INTO shop (name,price,description) VALUES (?,?,?)", args[2], price, args[3])
+    await message.answer(f"✅ Товар «{args[2]}» добавлен за {price} 💎")
+
+@router.message(Command(commands=["удалитьтовар","delitem"]))
+@owner_only
+async def cmd_delitem(message: Message):
+    args = message.text.split()
+    if len(args) < 2 or not args[1].isdigit():
+        await message.answer("⚠️ /удалитьтовар [id]"); return
+    q("DELETE FROM shop WHERE id=?", int(args[1]))
+    await message.answer(f"✅ Товар #{args[1]} удалён.")
+
+@router.message(Command(commands=["сбросбд","resetdb"]))
+@owner_only
+async def cmd_resetdb(message: Message):
+    args = message.text.split()
+    if len(args) < 2 or args[1] != "ПОДТВЕРЖДАЮ":
+        await message.answer("⚠️ Это сбросит всю БД!\nНапиши: /сбросбд ПОДТВЕРЖДАЮ"); return
+    db.executescript("""
+        DELETE FROM warns; DELETE FROM stats; DELETE FROM economy;
+        DELETE FROM inventory; DELETE FROM triggers; DELETE FROM mute_words;
+        DELETE FROM relationships; DELETE FROM family; DELETE FROM moderators;
+    """)
+    conn.commit()
+    await message.answer("✅ База данных очищена (чаты сохранены).")
+
+@router.message(Command(commands=["владелецпомощь","ownerhelp"]))
+@owner_only
+async def cmd_ownerhelp(message: Message):
+    await message.answer(
+        "👑 <b>Команды владельца</b>\n\n"
+        "/мойчаты — все чаты бота\n"
+        "/статбота — статистика\n"
+        "/рассылка [текст] — рассылка во все чаты\n"
+        "/лог [chat_id] [ch_id] — лог чата\n\n"
+        "<b>💰 Экономика</b>\n"
+        "/выдатьбаланс [id] [сумма]\n"
+        "/забратьбаланс [id] [сумма]\n"
+        "/добавитьтовар [цена] [название] [описание]\n"
+        "/удалитьтовар [id]\n\n"
+        "<b>🚫 Глобальная модерация</b>\n"
+        "/глобальныйбан — бан во всех чатах\n"
+        "/глобальныйразбан — разбан во всех чатах\n\n"
+        "<b>⚙️ Прочее</b>\n"
+        "/сбросбд ПОДТВЕРЖДАЮ — очистить БД",
+        parse_mode="HTML")
 
 # ══════════════════════════════════════════════
 #  LAUNCH
@@ -1053,7 +1210,10 @@ async def cmd_mychats(message: Message):
 async def main():
     dp.include_router(router)
     log.info("🚀 Replify запущен")
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    await dp.start_polling(
+        bot,
+        allowed_updates=["message", "chat_member", "my_chat_member"]
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
